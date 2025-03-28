@@ -14,70 +14,41 @@ jobs:
   setup-cluster:
     runs-on: ubuntu-latest
     steps:
-    - name: Install system dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          conntrack \
-          socat \
-          ebtables \
-          ethtool
+        sudo apt-get install -y conntrack socat
 
     - name: Install Minikube and kubectl
       run: |
-        # Install Minikube
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-        minikube version
-
-        # Install kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install kubectl /usr/local/bin/kubectl
-        kubectl version --client
 
-    - name: Start Minikube cluster with retries
+    - name: Start Minikube cluster
       run: |
-        for i in {1..5}; do
-          echo "Attempt $i to start Minikube..."
-          minikube start \
-            --driver=docker \
-            --force \
-            --alsologtostderr \
-            --v=3 && break || sleep 15
-        done
+        minikube start --driver=docker --force
+        minikube addons enable ingress
 
-        minikube status || minikube logs
-        minikube ip
+        # Экспорт всех сертификатов в рабочую директорию
+        mkdir -p ~/.kube/certs
+        cp -r ~/.minikube/* ~/.kube/certs/
+        echo "CERT_DIR=$(realpath ~/.kube/certs)" >> $GITHUB_ENV
 
-    - name: Prepare kubeconfig with health checks
+    - name: Prepare kubeconfig
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
+        # Генерация kubeconfig с абсолютными путями
+        minikube kubectl -- config view --raw | \
+          sed "s|/home/runner/.minikube|${{ env.CERT_DIR }}|g" > ~/.kube/config
 
-        # Wait for cluster to stabilize
-        for i in {1..20}; do
-          if minikube kubectl -- get nodes &>/dev/null; then
-            echo "Cluster is responsive!"
-            break
-          fi
-          echo "Waiting for cluster to respond... (attempt $i/20)"
-          sleep 5
-        done
-
-        # Generate reliable kubeconfig
-        minikube kubectl -- config view --raw > ~/.kube/config.tmp
-
-        # Ensure server address is correct
-        MINIKUBE_IP=$(minikube ip)
-        sed "s|server:.*|server: https://$MINIKUBE_IP:8443|" ~/.kube/config.tmp > ~/.kube/config
-
-        # Verify connectivity
+        # Проверка работоспособности
         kubectl config get-contexts
-        kubectl config use-context minikube
         kubectl cluster-info
         kubectl get nodes
 
-        # Encode for GitHub output
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
     outputs:
@@ -86,10 +57,6 @@ jobs:
   build-and-push:
     needs: setup-cluster
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
     steps:
     - uses: actions/checkout@v4
 
@@ -102,22 +69,8 @@ jobs:
 
     - name: Build and push Backend
       run: |
-        docker buildx create --use
-        docker buildx build \
-          --platform linux/amd64 \
-          -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} \
-          -t ${{ env.BACKEND_IMAGE }}:latest \
-          --push \
-          ./backend
-
-    - name: Build and push Frontend
-      run: |
-        docker buildx build \
-          --platform linux/amd64 \
-          -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} \
-          -t ${{ env.FRONTEND_IMAGE }}:latest \
-          --push \
-          ./frontend
+        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
+        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
 
   deploy:
     needs: [setup-cluster, build-and-push]
@@ -125,34 +78,23 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Configure kubectl
+    - name: Restore kubectl config
       run: |
         mkdir -p ~/.kube
         echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+        # Восстанавливаем сертификаты
+        mkdir -p ${{ env.CERT_DIR }}
+        cp -r ~/.kube/certs/* ${{ env.CERT_DIR }}/
 
-        # Final verification
         kubectl config get-contexts
-        kubectl config current-context
         kubectl cluster-info
-        kubectl get nodes
+
       env:
         KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
+        CERT_DIR: ${{ needs.setup-cluster.env.CERT_DIR }}
 
-    - name: Deploy application
+    - name: Deploy to Kubernetes
       run: |
-        # Apply all manifests
         kubectl apply -f k8s/
-
-        # Wait for rollouts
-        kubectl rollout status deployment/backend --timeout=300s
-        kubectl rollout status deployment/frontend --timeout=300s
-
-        # Verify services
-        kubectl get svc -o wide
-        kubectl get pods -o wide --show-labels
-
-    - name: Get service URLs
-      run: |
-        echo "Backend ClusterIP: $(kubectl get svc backend-service -o jsonpath='{.spec.clusterIP}')"
-        echo "Frontend URL: $(minikube service frontend-service --url)"
-        echo "Kubernetes Dashboard: $(minikube dashboard --url)"
+        kubectl rollout status deployment/backend --timeout=180s
+        minikube service frontend-service --url
