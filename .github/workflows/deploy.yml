@@ -1,18 +1,4 @@
 name: Deploy Messenger to Kubernetes
-run: |
-    mkdir -p ~/.kube
-    echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
-
-    kubectl cluster-info
-
-    kubectl apply -f k8s/redis.yaml --validate=false
-    kubectl apply -f k8s/backend.yaml --validate=false
-    kubectl apply -f k8s/frontend.yaml --validate=false
-
-    kubectl set image deployment/backend backend=$BACKEND_IMAGE:$GITHUB_SHA
-    kubectl set image deployment/frontend frontend=$FRONTEND_IMAGE:$GITHUB_SHA
-env:
-    KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
 
 on:
   push:
@@ -30,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write  # Необходимо для push в GHCR
+      packages: write
 
     steps:
     - name: Checkout code
@@ -41,7 +27,7 @@ jobs:
       with:
         registry: ${{ env.REGISTRY }}
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}  # Встроенный токен (не требует ручного создания)
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Build and push Backend
       run: |
@@ -68,13 +54,19 @@ jobs:
     - name: Install kubectl
       uses: azure/setup-kubectl@v3
 
+    - name: Configure Kubernetes access
+      run: |
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+        kubectl cluster-info
+      env:
+        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
     - name: Deploy to Kubernetes
       run: |
-        kubectl apply -f k8s/redis.yaml
-        kubectl apply -f k8s/backend.yaml
-        kubectl apply -f k8s/frontend.yaml
-
+        kubectl apply -f k8s/redis.yaml --validate=false
+        kubectl apply -f k8s/backend.yaml --validate=false
+        kubectl apply -f k8s/frontend.yaml --validate=false
+        
         kubectl set image deployment/backend backend=${{ env.BACKEND_IMAGE }}:${{ github.sha }}
         kubectl set image deployment/frontend frontend=${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
-      env:
-        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}  # Закодированный kubeconfig (cat ~/.kube/config | base64 -w0)
