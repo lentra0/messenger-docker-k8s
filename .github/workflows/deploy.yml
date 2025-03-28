@@ -19,12 +19,10 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y conntrack socat
 
-    - name: Install Minikube and kubectl
+    - name: Install Minikube
       run: |
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo install kubectl /usr/local/bin/kubectl
 
     - name: Start Minikube cluster
       run: |
@@ -32,16 +30,13 @@ jobs:
         # Явное ожидание инициализации
         sleep 30
         minikube status
-        minikube kubectl -- get nodes
 
-    - name: Prepare kubeconfig
+    - name: Prepare kubeconfig (без minify)
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        # Явное создание контекста
-        minikube update-context
-        # Двойная проверка
-        minikube kubectl -- config view --minify > ~/.kube/config
+        # Используем полный конфиг без minify
+        minikube kubectl -- config view > ~/.kube/config
         kubectl config get-contexts
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
