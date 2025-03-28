@@ -29,13 +29,41 @@ jobs:
         minikube start --driver=docker --force
         minikube status
 
-    - name: Generate kubeconfig
+    - name: Generate proper kubeconfig
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        minikube kubectl -- config view > ~/.kube/config
+        # Получаем IP кластера
+        MINIKUBE_IP=$(minikube ip)
+
+        # Создаем правильный kubeconfig вручную
+        cat <<EOF > ~/.kube/config
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /home/runner/.minikube/ca.crt
+    server: https://$MINIKUBE_IP:8443
+  name: minikube
+contexts:
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: minikube
+  user:
+    client-certificate: /home/runner/.minikube/profiles/minikube/client.crt
+    client-key: /home/runner/.minikube/profiles/minikube/client.key
+EOF
+
+        # Проверяем работоспособность
         kubectl config get-contexts
         kubectl cluster-info
+        kubectl get nodes
+
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
     outputs:
@@ -53,7 +81,6 @@ jobs:
         echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
         kubectl config get-contexts
         kubectl cluster-info
-        kubectl get nodes
 
       env:
         KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
@@ -62,4 +89,3 @@ jobs:
       run: |
         kubectl apply -f k8s/
         kubectl get pods -w
-        minikube service frontend-service --url
