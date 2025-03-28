@@ -5,112 +5,40 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-backend
-  FRONTEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-frontend
-
 jobs:
-  setup-cluster:
+  setup-infra:
     runs-on: ubuntu-latest
     steps:
-    - name: Install Minikube and dependencies
+    - name: Install Minikube
       run: |
-        sudo apt-get update -q
-        sudo apt-get install -qy conntrack
-
-        # Install Minikube
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-
-        # Install kubectl
-        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-        sudo install kubectl /usr/local/bin/kubectl
-        sudo chmod +x /usr/local/bin/kubectl
-
-    - name: Start Minikube cluster
-      run: |
         minikube start --driver=docker --force
-        minikube addons enable ingress
-        minikube update-context
+        minikube kubectl -- version --client
 
     - name: Prepare kubeconfig
-      id: kubeconfig
       run: |
         mkdir -p ~/.kube
         minikube kubectl -- config view --flatten > ~/.kube/config
-        echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
         kubectl cluster-info
 
-    outputs:
-      kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
-
-  build-and-push:
-    needs: setup-cluster
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Backend
-      run: |
-        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
-        docker tag ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ${{ env.BACKEND_IMAGE }}:latest
-        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-        docker push ${{ env.BACKEND_IMAGE }}:latest
-
-    - name: Build and push Frontend
-      run: |
-        docker build -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} ./frontend
-        docker tag ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} ${{ env.FRONTEND_IMAGE }}:latest
-        docker push ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
-        docker push ${{ env.FRONTEND_IMAGE }}:latest
-
   deploy:
-    needs: [setup-cluster, build-and-push]
+    needs: setup-infra
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
 
     - name: Configure kubectl
       run: |
         mkdir -p ~/.kube
-        echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
-        kubectl config use-context minikube
-        kubectl cluster-info
+        minikube kubectl -- config view --flatten > ~/.kube/config
+        kubectl get nodes
 
-      env:
-        KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
+    - name: Deploy Redis
+      run: kubectl apply -f k8s/redis.yaml
 
-    - name: Deploy application
+    - name: Deploy Application
       run: |
-        # Apply Kubernetes manifests
-        kubectl apply -f k8s/redis.yaml --validate=false
-        kubectl apply -f k8s/backend.yaml --validate=false
-        kubectl apply -f k8s/frontend.yaml --validate=false
-
-        # Update images
-        kubectl set image deployment/backend backend=${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-        kubectl set image deployment/frontend frontend=${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
-
-        # Wait for rollout
-        kubectl rollout status deployment/backend --timeout=90s
-        kubectl rollout status deployment/frontend --timeout=90s
-
-    - name: Verify deployment
-      run: |
-        echo "=== Kubernetes Resources ==="
-        kubectl get all
-        echo "=== Frontend Service URL ==="
-        minikube service frontend-service --url
+        kubectl apply -f k8s/backend.yaml
+        kubectl apply -f k8s/frontend.yaml
+        kubectl get pods -w
