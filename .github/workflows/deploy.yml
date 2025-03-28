@@ -11,18 +11,21 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/messenger  # Например, ghcr.io/yourname/messenger
 
 jobs:
+  permissions:
+    contents: read
+    packages: write
   build-and-push:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+      - name: Login to GHCR
+    uses: docker/login-action@v3
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ secrets.GITHUB_TOKEN }}  # Встроенный токен
 
       # Собираем и пушим backend
       - name: Build and push backend
