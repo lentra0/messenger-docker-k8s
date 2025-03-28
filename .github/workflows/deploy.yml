@@ -5,25 +5,69 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-backend
+  FRONTEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-frontend
+
 jobs:
-  setup-infra:
+  setup-cluster:
     runs-on: ubuntu-latest
     steps:
-    - name: Install Minikube
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y conntrack
+
+    - name: Install Minikube and kubectl
       run: |
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-        minikube start --driver=docker --force
-        minikube kubectl -- version --client
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install kubectl /usr/local/bin/kubectl
+        sudo chmod +x /usr/local/bin/kubectl
 
-    - name: Prepare kubeconfig
+    - name: Start Minikube cluster
       run: |
-        mkdir -p ~/.kube
-        minikube kubectl -- config view --flatten > ~/.kube/config
+        minikube start --driver=docker --force
+        minikube update-context
+        minikube addons enable ingress
+
+    - name: Verify cluster
+      run: |
+        minikube status
         kubectl cluster-info
+        kubectl get nodes
+
+  build-and-push:
+    needs: setup-cluster
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Backend
+      run: |
+        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
+        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+
+    - name: Build and push Frontend
+      run: |
+        docker build -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} ./frontend
+        docker push ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
 
   deploy:
-    needs: setup-infra
+    needs: [setup-cluster, build-and-push]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -32,13 +76,19 @@ jobs:
       run: |
         mkdir -p ~/.kube
         minikube kubectl -- config view --flatten > ~/.kube/config
-        kubectl get nodes
+        kubectl config use-context minikube
+        kubectl cluster-info
 
-    - name: Deploy Redis
-      run: kubectl apply -f k8s/redis.yaml
-
-    - name: Deploy Application
+    - name: Deploy to Kubernetes
       run: |
+        kubectl apply -f k8s/redis.yaml
         kubectl apply -f k8s/backend.yaml
         kubectl apply -f k8s/frontend.yaml
-        kubectl get pods -w
+
+        kubectl rollout status deployment/backend --timeout=90s
+        kubectl rollout status deployment/frontend --timeout=90s
+
+    - name: Get frontend URL
+      run: |
+        echo "Frontend URL:"
+        minikube service frontend-service --url
