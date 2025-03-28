@@ -19,50 +19,37 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y conntrack socat
 
-    - name: Install Minikube
+    - name: Install Minikube and kubectl
       run: |
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-        minikube version
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install kubectl /usr/local/bin/kubectl
 
     - name: Start Minikube cluster
       run: |
         minikube start --driver=docker --force
-        minikube update-context
+        # Явное ожидание инициализации
+        sleep 30
         minikube status
+        minikube kubectl -- get nodes
 
     - name: Prepare kubeconfig
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        minikube kubectl -- config view --flatten > ~/.kube/config
-        kubectl config use-context minikube
-        kubectl cluster-info
+        # Явное создание контекста
+        minikube update-context
+        # Двойная проверка
+        minikube kubectl -- config view --minify > ~/.kube/config
+        kubectl config get-contexts
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
     outputs:
       kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
 
-  build-and-push:
-    needs: setup-cluster
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Backend
-      run: |
-        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
-        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-
   deploy:
-    needs: [setup-cluster, build-and-push]
+    needs: setup-cluster
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -79,8 +66,5 @@ jobs:
 
     - name: Deploy application
       run: |
-        kubectl apply -f k8s/redis.yaml
-        kubectl apply -f k8s/backend.yaml
-        kubectl apply -f k8s/frontend.yaml
-        kubectl rollout status deployment/backend --timeout=180s
-        minikube service frontend-service --url
+        kubectl apply -f k8s/
+        kubectl get pods -w
