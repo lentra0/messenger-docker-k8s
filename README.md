@@ -12,9 +12,13 @@
 messenger/
 ├── backend/              # Python/FastAPI сервер
 │   ├── app/              # Исходный код
+│   └── requirements.txt  # Необходимые библиотеки
 │   └── Dockerfile        # Конфигурация образа
 ├── frontend/             # React клиент
+│   ├── public/
 │   ├── src/              # Исходный код
+│   ├── packages.json
+│   ├── packages-lock.json  
 │   └── Dockerfile        
 ├── k8s/                  # Kubernetes манифесты
 │   ├── backend.yaml
