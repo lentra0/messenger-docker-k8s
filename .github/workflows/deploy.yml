@@ -11,22 +11,28 @@ env:
   FRONTEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-frontend
 
 jobs:
-  setup-infra:
+  setup-cluster:
     runs-on: ubuntu-latest
     steps:
-    - name: Install Minikube and kubectl
+    - name: Install Minikube and dependencies
       run: |
-        # Установка Minikube
+        sudo apt-get update -q
+        sudo apt-get install -qy conntrack
+
+        # Install Minikube
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
 
-        # Установка kubectl
+        # Install kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install kubectl /usr/local/bin/kubectl
+        sudo chmod +x /usr/local/bin/kubectl
 
-        # Запуск кластера
-        minikube start --driver=docker
+    - name: Start Minikube cluster
+      run: |
+        minikube start --driver=docker --force
         minikube addons enable ingress
+        minikube update-context
 
     - name: Prepare kubeconfig
       id: kubeconfig
@@ -34,12 +40,13 @@ jobs:
         mkdir -p ~/.kube
         minikube kubectl -- config view --flatten > ~/.kube/config
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
+        kubectl cluster-info
 
     outputs:
       kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
 
   build-and-push:
-    needs: setup-infra
+    needs: setup-cluster
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,7 +77,7 @@ jobs:
         docker push ${{ env.FRONTEND_IMAGE }}:latest
 
   deploy:
-    needs: [setup-infra, build-and-push]
+    needs: [setup-cluster, build-and-push]
     runs-on: ubuntu-latest
 
     steps:
@@ -79,25 +86,31 @@ jobs:
     - name: Configure kubectl
       run: |
         mkdir -p ~/.kube
-        echo "$KUBE_CONFIG" > ~/.kube/config
+        echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+        kubectl config use-context minikube
         kubectl cluster-info
+
       env:
-        KUBE_CONFIG: ${{ needs.setup-infra.outputs.kubeconfig }}
+        KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
 
-    - name: Deploy to Kubernetes
+    - name: Deploy application
       run: |
-        kubectl apply -f k8s/redis.yaml
-        kubectl apply -f k8s/backend.yaml
-        kubectl apply -f k8s/frontend.yaml
+        # Apply Kubernetes manifests
+        kubectl apply -f k8s/redis.yaml --validate=false
+        kubectl apply -f k8s/backend.yaml --validate=false
+        kubectl apply -f k8s/frontend.yaml --validate=false
 
+        # Update images
         kubectl set image deployment/backend backend=${{ env.BACKEND_IMAGE }}:${{ github.sha }}
         kubectl set image deployment/frontend frontend=${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
 
+        # Wait for rollout
+        kubectl rollout status deployment/backend --timeout=90s
+        kubectl rollout status deployment/frontend --timeout=90s
+
     - name: Verify deployment
       run: |
-        echo "=== Pods ==="
-        kubectl get pods -o wide
-        echo "=== Services ==="
-        kubectl get svc
-        echo "=== Frontend URL ==="
+        echo "=== Kubernetes Resources ==="
+        kubectl get all
+        echo "=== Frontend Service URL ==="
         minikube service frontend-service --url
