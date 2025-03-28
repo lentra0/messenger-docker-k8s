@@ -12,8 +12,8 @@
 messenger/
 ├── backend/              # Python/FastAPI сервер
 │   ├── app/              # Исходный код
-│   └── requirements.txt  # Необходимые библиотеки
-│   └── Dockerfile        # Конфигурация образа
+│   └── requirements.txt  
+│   └── Dockerfile        
 ├── frontend/             # React клиент
 │   ├── public/
 │   ├── src/              # Исходный код
