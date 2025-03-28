@@ -1,5 +1,3 @@
-Вот профессиональный `README.md` для вашего мессенджера с поддержкой Kubernetes:
-
 ```markdown
 # 🚀 Messenger App with Kubernetes Deployment
 
