@@ -2,9 +2,8 @@ name: Deploy Messenger to Kubernetes
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -12,7 +11,28 @@ env:
   FRONTEND_IMAGE: ghcr.io/lentra0/messenger-docker-k8s-frontend
 
 jobs:
+  setup-cluster:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install Minikube
+      run: |
+        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        sudo install minikube-linux-amd64 /usr/local/bin/minikube
+        minikube start --driver=docker
+        minikube kubectl -- get pods -A
+
+    - name: Get kubeconfig
+      id: kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        minikube kubectl -- config view --flatten > ~/.kube/config
+        echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
+
+    outputs:
+      kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
+
   build-and-push:
+    needs: setup-cluster
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -39,22 +59,25 @@ jobs:
         docker push ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
 
   deploy:
-    needs: build-and-push
+    needs: [setup-cluster, build-and-push]
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install kubectl
-      uses: azure/setup-kubectl@v3
+    - name: Configure kubectl
+      run: |
+        mkdir -p ~/.kube
+        echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+        kubectl cluster-info
+      env:
+        KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
 
     - name: Deploy to Kubernetes
       run: |
-        kubectl apply -f k8s/redis.yaml --validate=false
-        kubectl apply -f k8s/backend.yaml --validate=false
-        kubectl apply -f k8s/frontend.yaml --validate=false
+        kubectl apply -f k8s/redis.yaml
+        kubectl apply -f k8s/backend.yaml
+        kubectl apply -f k8s/frontend.yaml
 
         kubectl set image deployment/backend backend=${{ env.BACKEND_IMAGE }}:${{ github.sha }}
         kubectl set image deployment/frontend frontend=${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
-      env:
-        KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
