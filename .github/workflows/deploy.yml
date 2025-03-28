@@ -23,27 +23,26 @@ jobs:
       run: |
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
-        minikube version
-
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install kubectl /usr/local/bin/kubectl
-        kubectl version --client
 
-    - name: Start Minikube cluster
+    - name: Start Minikube cluster (with retry)
       run: |
-        minikube start --driver=docker --force --alsologtostderr
-        minikube config set WantUpdateNotification false
-        minikube update-context
-        minikube addons enable ingress
+        for i in {1..3}; do
+          minikube start --driver=docker --force && break || sleep 10
+        done
+        minikube status || minikube logs
 
     - name: Prepare kubeconfig
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        minikube kubectl -- config view --minify --flatten > ~/.kube/config
-        echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
-        kubectl config current-context
+        # Wait for cluster to be fully ready
+        sleep 15
+        minikube kubectl -- config view > ~/.kube/config
+        kubectl config use-context minikube
         kubectl cluster-info
+        echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
     outputs:
       kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
@@ -51,29 +50,19 @@ jobs:
   build-and-push:
     needs: setup-cluster
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
     steps:
     - uses: actions/checkout@v4
 
-    - name: Login to GHCR
-      uses: docker/login-action@v3
+    - name: Build and push images
+      uses: docker/build-push-action@v4
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Backend
-      run: |
-        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
-        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-
-    - name: Build and push Frontend
-      run: |
-        docker build -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} ./frontend
-        docker push ${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
+        context: ./backend
+        push: true
+        tags: |
+          ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
+          ${{ env.BACKEND_IMAGE }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
   deploy:
     needs: [setup-cluster, build-and-push]
@@ -85,25 +74,18 @@ jobs:
       run: |
         mkdir -p ~/.kube
         echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
-        kubectl config get-contexts
-        kubectl cluster-info
+        kubectl config current-context
+        kubectl get nodes
       env:
         KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
 
-    - name: Deploy to Kubernetes
+    - name: Deploy application
       run: |
-        kubectl apply -f k8s/redis.yaml --validate=false
-        kubectl apply -f k8s/backend.yaml --validate=false
-        kubectl apply -f k8s/frontend.yaml --validate=false
+        kubectl apply -f k8s/
+        kubectl rollout status deployment/backend --timeout=180s
+        kubectl rollout status deployment/frontend --timeout=180s
 
-        kubectl rollout restart deployment/backend
-        kubectl rollout restart deployment/frontend
-        kubectl rollout status deployment/backend --timeout=120s
-        kubectl rollout status deployment/frontend --timeout=120s
-
-    - name: Verify deployment
+    - name: Get service URLs
       run: |
-        kubectl get pods -o wide
-        kubectl get svc
-        echo "Frontend URL:"
-        minikube service frontend-service --url
+        echo "Backend: $(kubectl get svc backend-service -o jsonpath='{.spec.clusterIP}')"
+        echo "Frontend: $(minikube service frontend-service --url)"
