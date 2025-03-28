@@ -25,6 +25,6 @@
         kubectl apply -f k8s/redis.yaml --validate=false
         kubectl apply -f k8s/backend.yaml --validate=false
         kubectl apply -f k8s/frontend.yaml --validate=false
-
+        
         kubectl set image deployment/backend backend=${{ env.BACKEND_IMAGE }}:${{ github.sha }}
         kubectl set image deployment/frontend frontend=${{ env.FRONTEND_IMAGE }}:${{ github.sha }}
