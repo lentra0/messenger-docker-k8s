@@ -1,4 +1,18 @@
 name: Deploy Messenger to Kubernetes
+run: |
+    mkdir -p ~/.kube
+    echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+
+    kubectl cluster-info
+
+    kubectl apply -f k8s/redis.yaml --validate=false
+    kubectl apply -f k8s/backend.yaml --validate=false
+    kubectl apply -f k8s/frontend.yaml --validate=false
+
+    kubectl set image deployment/backend backend=$BACKEND_IMAGE:$GITHUB_SHA
+    kubectl set image deployment/frontend frontend=$FRONTEND_IMAGE:$GITHUB_SHA
+env:
+    KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
 
 on:
   push:
