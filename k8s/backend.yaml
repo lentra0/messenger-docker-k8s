@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: yourusername/messenger-backend:latest
+        image: ghcr.io/lentra0/messenger-backend:latest
         ports:
         - containerPort: 8000
         env:
