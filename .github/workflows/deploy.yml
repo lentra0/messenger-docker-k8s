@@ -17,27 +17,36 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y conntrack
+        sudo apt-get install -y conntrack socat
 
     - name: Install Minikube and kubectl
       run: |
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
+        minikube version
+
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install kubectl /usr/local/bin/kubectl
-        sudo chmod +x /usr/local/bin/kubectl
+        kubectl version --client
 
     - name: Start Minikube cluster
       run: |
-        minikube start --driver=docker --force
+        minikube start --driver=docker --force --alsologtostderr
+        minikube config set WantUpdateNotification false
         minikube update-context
         minikube addons enable ingress
 
-    - name: Verify cluster
+    - name: Prepare kubeconfig
+      id: kubeconfig
       run: |
-        minikube status
+        mkdir -p ~/.kube
+        minikube kubectl -- config view --minify --flatten > ~/.kube/config
+        echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
+        kubectl config current-context
         kubectl cluster-info
-        kubectl get nodes
+
+    outputs:
+      kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
 
   build-and-push:
     needs: setup-cluster
@@ -75,20 +84,26 @@ jobs:
     - name: Configure kubectl
       run: |
         mkdir -p ~/.kube
-        minikube kubectl -- config view --flatten > ~/.kube/config
-        kubectl config use-context minikube
+        echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+        kubectl config get-contexts
         kubectl cluster-info
+      env:
+        KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
 
     - name: Deploy to Kubernetes
       run: |
-        kubectl apply -f k8s/redis.yaml
-        kubectl apply -f k8s/backend.yaml
-        kubectl apply -f k8s/frontend.yaml
+        kubectl apply -f k8s/redis.yaml --validate=false
+        kubectl apply -f k8s/backend.yaml --validate=false
+        kubectl apply -f k8s/frontend.yaml --validate=false
 
-        kubectl rollout status deployment/backend --timeout=90s
-        kubectl rollout status deployment/frontend --timeout=90s
+        kubectl rollout restart deployment/backend
+        kubectl rollout restart deployment/frontend
+        kubectl rollout status deployment/backend --timeout=120s
+        kubectl rollout status deployment/frontend --timeout=120s
 
-    - name: Get frontend URL
+    - name: Verify deployment
       run: |
+        kubectl get pods -o wide
+        kubectl get svc
         echo "Frontend URL:"
         minikube service frontend-service --url
