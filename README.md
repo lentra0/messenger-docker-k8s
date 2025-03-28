@@ -1,6 +1,3 @@
-Вот профессиональный `README.md` для вашего мессенджера с поддержкой Kubernetes:
-
-```markdown
 # 🚀 Messenger App with Kubernetes Deployment
 
 ![Docker](https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white)
