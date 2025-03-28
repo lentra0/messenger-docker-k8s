@@ -14,34 +14,70 @@ jobs:
   setup-cluster:
     runs-on: ubuntu-latest
     steps:
-    - name: Install dependencies
+    - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y conntrack socat
+        sudo apt-get install -y \
+          conntrack \
+          socat \
+          ebtables \
+          ethtool
 
     - name: Install Minikube and kubectl
       run: |
+        # Install Minikube
         curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
         sudo install minikube-linux-amd64 /usr/local/bin/minikube
+        minikube version
+
+        # Install kubectl
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install kubectl /usr/local/bin/kubectl
+        kubectl version --client
 
-    - name: Start Minikube cluster (with retry)
+    - name: Start Minikube cluster with retries
       run: |
-        for i in {1..3}; do
-          minikube start --driver=docker --force && break || sleep 10
+        for i in {1..5}; do
+          echo "Attempt $i to start Minikube..."
+          minikube start \
+            --driver=docker \
+            --force \
+            --alsologtostderr \
+            --v=3 && break || sleep 15
         done
-        minikube status || minikube logs
 
-    - name: Prepare kubeconfig
+        minikube status || minikube logs
+        minikube ip
+
+    - name: Prepare kubeconfig with health checks
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        # Wait for cluster to be fully ready
-        sleep 15
-        minikube kubectl -- config view > ~/.kube/config
+
+        # Wait for cluster to stabilize
+        for i in {1..20}; do
+          if minikube kubectl -- get nodes &>/dev/null; then
+            echo "Cluster is responsive!"
+            break
+          fi
+          echo "Waiting for cluster to respond... (attempt $i/20)"
+          sleep 5
+        done
+
+        # Generate reliable kubeconfig
+        minikube kubectl -- config view --raw > ~/.kube/config.tmp
+
+        # Ensure server address is correct
+        MINIKUBE_IP=$(minikube ip)
+        sed "s|server:.*|server: https://$MINIKUBE_IP:8443|" ~/.kube/config.tmp > ~/.kube/config
+
+        # Verify connectivity
+        kubectl config get-contexts
         kubectl config use-context minikube
         kubectl cluster-info
+        kubectl get nodes
+
+        # Encode for GitHub output
         echo "KUBE_CONFIG=$(cat ~/.kube/config | base64 -w0)" >> $GITHUB_OUTPUT
 
     outputs:
@@ -50,19 +86,38 @@ jobs:
   build-and-push:
     needs: setup-cluster
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build and push images
-      uses: docker/build-push-action@v4
+    - name: Login to GHCR
+      uses: docker/login-action@v3
       with:
-        context: ./backend
-        push: true
-        tags: |
-          ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-          ${{ env.BACKEND_IMAGE }}:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Backend
+      run: |
+        docker buildx create --use
+        docker buildx build \
+          --platform linux/amd64 \
+          -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} \
+          -t ${{ env.BACKEND_IMAGE }}:latest \
+          --push \
+          ./backend
+
+    - name: Build and push Frontend
+      run: |
+        docker buildx build \
+          --platform linux/amd64 \
+          -t ${{ env.FRONTEND_IMAGE }}:${{ github.sha }} \
+          -t ${{ env.FRONTEND_IMAGE }}:latest \
+          --push \
+          ./frontend
 
   deploy:
     needs: [setup-cluster, build-and-push]
@@ -74,18 +129,30 @@ jobs:
       run: |
         mkdir -p ~/.kube
         echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+
+        # Final verification
+        kubectl config get-contexts
         kubectl config current-context
+        kubectl cluster-info
         kubectl get nodes
       env:
         KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
 
     - name: Deploy application
       run: |
+        # Apply all manifests
         kubectl apply -f k8s/
-        kubectl rollout status deployment/backend --timeout=180s
-        kubectl rollout status deployment/frontend --timeout=180s
+
+        # Wait for rollouts
+        kubectl rollout status deployment/backend --timeout=300s
+        kubectl rollout status deployment/frontend --timeout=300s
+
+        # Verify services
+        kubectl get svc -o wide
+        kubectl get pods -o wide --show-labels
 
     - name: Get service URLs
       run: |
-        echo "Backend: $(kubectl get svc backend-service -o jsonpath='{.spec.clusterIP}')"
-        echo "Frontend: $(minikube service frontend-service --url)"
+        echo "Backend ClusterIP: $(kubectl get svc backend-service -o jsonpath='{.spec.clusterIP}')"
+        echo "Frontend URL: $(minikube service frontend-service --url)"
+        echo "Kubernetes Dashboard: $(minikube dashboard --url)"
