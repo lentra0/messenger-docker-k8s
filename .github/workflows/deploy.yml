@@ -28,24 +28,59 @@ jobs:
 
     - name: Start Minikube cluster
       run: |
-        minikube start --driver=docker --force
-        minikube addons enable ingress
+        # Запускаем Minikube с явным указанием API-сервера
+        minikube start \
+          --driver=docker \
+          --force \
+          --apiserver-ips=127.0.0.1 \
+          --apiserver-name=localhost \
+          --apiserver-port=8443
 
-        # Экспорт всех сертификатов в рабочую директорию
-        mkdir -p ~/.kube/certs
-        cp -r ~/.minikube/* ~/.kube/certs/
-        echo "CERT_DIR=$(realpath ~/.kube/certs)" >> $GITHUB_ENV
+        # Явно обновляем контекст
+        minikube update-context --force
 
-    - name: Prepare kubeconfig
+        # Проверяем работоспособность
+        minikube status
+        minikube ip
+
+    - name: Generate reliable kubeconfig
       id: kubeconfig
       run: |
         mkdir -p ~/.kube
-        # Генерация kubeconfig с абсолютными путями
-        minikube kubectl -- config view --raw | \
-          sed "s|/home/runner/.minikube|${{ env.CERT_DIR }}|g" > ~/.kube/config
+        # Получаем IP Minikube
+        MINIKUBE_IP=$(minikube ip)
 
-        # Проверка работоспособности
-        kubectl config get-contexts
+        # Генерируем kubeconfig с правильными путями
+        cat <<EOF > ~/.kube/config
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: /tmp/minikube/ca.crt
+    server: https://$MINIKUBE_IP:8443
+  name: minikube
+contexts:
+- context:
+    cluster: minikube
+    user: minikube
+  name: minikube
+current-context: minikube
+kind: Config
+preferences: {}
+users:
+- name: minikube
+  user:
+    client-certificate: /tmp/minikube/client.crt
+    client-key: /tmp/minikube/client.key
+EOF
+
+        # Копируем сертификаты в /tmp
+        mkdir -p /tmp/minikube
+        cp ~/.minikube/ca.crt /tmp/minikube/
+        cp ~/.minikube/profiles/minikube/client.crt /tmp/minikube/
+        cp ~/.minikube/profiles/minikube/client.key /tmp/minikube/
+
+        # Проверяем подключение
+        kubectl config use-context minikube
         kubectl cluster-info
         kubectl get nodes
 
@@ -54,47 +89,36 @@ jobs:
     outputs:
       kubeconfig: ${{ steps.kubeconfig.outputs.KUBE_CONFIG }}
 
-  build-and-push:
+  deploy:
     needs: setup-cluster
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
 
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Backend
-      run: |
-        docker build -t ${{ env.BACKEND_IMAGE }}:${{ github.sha }} ./backend
-        docker push ${{ env.BACKEND_IMAGE }}:${{ github.sha }}
-
-  deploy:
-    needs: [setup-cluster, build-and-push]
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Restore kubectl config
+    - name: Configure kubectl
       run: |
         mkdir -p ~/.kube
         echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
-        # Восстанавливаем сертификаты
-        mkdir -p ${{ env.CERT_DIR }}
-        cp -r ~/.kube/certs/* ${{ env.CERT_DIR }}/
 
+        # Восстанавливаем сертификаты
+        mkdir -p /tmp/minikube
+        echo "$CA_CRT" | base64 -d > /tmp/minikube/ca.crt
+        echo "$CLIENT_CRT" | base64 -d > /tmp/minikube/client.crt
+        echo "$CLIENT_KEY" | base64 -d > /tmp/minikube/client.key
+
+        # Проверяем подключение
         kubectl config get-contexts
         kubectl cluster-info
+        kubectl get nodes
 
       env:
         KUBE_CONFIG: ${{ needs.setup-cluster.outputs.kubeconfig }}
-        CERT_DIR: ${{ needs.setup-cluster.env.CERT_DIR }}
+        CA_CRT: ${{ secrets.CA_CRT }}
+        CLIENT_CRT: ${{ secrets.CLIENT_CRT }}
+        CLIENT_KEY: ${{ secrets.CLIENT_KEY }}
 
-    - name: Deploy to Kubernetes
+    - name: Deploy application
       run: |
         kubectl apply -f k8s/
-        kubectl rollout status deployment/backend --timeout=180s
+        kubectl rollout status deployment/backend --timeout=300s
         minikube service frontend-service --url
